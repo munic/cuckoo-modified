@@ -73,7 +73,11 @@ class MongoDB(Report):
                 return new._id
 
     def debug_dict_size(self, dct):
-        totals = {k: 0 for k in dct.keys()}
+        #totals = {k: 0 for k in dct.keys()}
+        #NF: Can't use python 3 construct unless we upgrade, so modifying to use simple loop.
+        totals = {}
+        for key in dct.keys():
+            totals[key] = 0
         def walk(root, key, val):
             if isinstance(val, dict):
                 for k, v in val.iteritems():
