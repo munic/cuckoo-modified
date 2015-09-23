@@ -59,7 +59,13 @@
                                 <td>{{analysis.static.pe_icon_fuzzy}}</td>
                             </tr>
                         {% endif %}
-                    </table>
+                        {% if analysis.static.pe_exported_dll_name %}
+                            <tr>
+                                <th style="width: 15%;">Exported DLL Name</th>
+                                <td>{{analysis.static.pe_exported_dll_name}}</td>
+                            </tr>
+                        {% endif %}
+                     </table>
                 </div>
             </div>
             <hr />
@@ -187,6 +193,7 @@
                         <th>Size</th>
                         <th>Language</th>
                         <th>Sub-language</th>
+                        <th>Entropy</th>
                         <th>File type</th>
                     </tr>
                     {% for section in analysis.static.pe_resources %}
@@ -196,6 +203,7 @@
                             <td>{{section.size}}</td>
                             <td>{{section.language}}</td>
                             <td>{{section.sublanguage}}</td>
+                            <td>{{section.entropy}}</td>
                             <td>{{section.filetype}}</td>
                         </tr>
                     {% endfor %}

@@ -191,6 +191,8 @@ class RunProcessing(object):
         try:
             # Run the processing module and retrieve the generated data to be
             # appended to the general results container.
+            log.debug("Executing processing module \"%s\" on analysis at "
+                      "\"%s\"", current.__class__.__name__, self.analysis_path)
             pretime = datetime.now()
             data = current.run()
             posttime = datetime.now()
@@ -200,9 +202,6 @@ class RunProcessing(object):
                 "time": float("%d.%03d" % (timediff.seconds,
                                          timediff.microseconds / 1000)),
                 })
-
-            log.debug("Executed processing module \"%s\" on analysis at "
-                      "\"%s\"", current.__class__.__name__, self.analysis_path)
 
             # If succeeded, return they module's key name and the data to be
             # appended to it.
@@ -336,14 +335,14 @@ class RunSignatures(object):
                           "\"{0}\":".format(signature))
             return
 
-        log.debug("Running signature \"%s\"", current.name)
-
         # If the signature is disabled, skip it.
         if not current.enabled:
             return None
 
         if not self._check_signature_version(current):
             return None
+        
+        log.debug("Running signature \"%s\"", current.name)
 
         try:
             # Run the signature and if it gets matched, extract key information
@@ -387,7 +386,7 @@ class RunSignatures(object):
         for signature in complete_list + evented_list:
             self._apply_overlay(signature, overlay)
 
-        if evented_list:
+        if evented_list and "behavior" in self.results:
             log.debug("Running %u evented signatures", len(evented_list))
             for sig in evented_list:
                 stats[sig.name] = timedelta()
@@ -509,7 +508,7 @@ class RunSignatures(object):
             if "families" in match and match["families"]:
                 family = match["families"][0].title()
                 break
-        if not family and "virustotal" in self.results and "results" in self.results["virustotal"] and self.results["virustotal"]["results"]:
+        if not family and self.results["info"]["category"] == "file" and "virustotal" in self.results and "results" in self.results["virustotal"] and self.results["virustotal"]["results"]:
             detectnames = []
             for res in self.results["virustotal"]["results"]:
                 if res["sig"]:
@@ -524,9 +523,13 @@ class RunSignatures(object):
             for alert in self.results["suricata"]["alerts"]:
                 if "signature" in alert and alert["signature"]:
                     if alert["signature"].startswith("ET TROJAN") or alert["signature"].startswith("ETPRO TROJAN"):
-                        words = re.findall(r"[A-Za-z0-9\./]+", alert["signature"])
+                        words = re.findall(r"[A-Za-z0-9\.]+", alert["signature"])
                         famcheck = words[2]
-                        famchecklower = words[2].lower()
+                        famchecklower = famcheck.lower()
+                        if famchecklower == "win32":
+                            famcheck = words[3]
+                            famchecklower = famcheck.lower()
+
                         blacklist = [
                             "upx",
                             "executable",
@@ -550,8 +553,6 @@ class RunSignatures(object):
                                 isgood = False
                                 break
                         if isgood:
-                            if famchecklower.startswith("win32"):
-                                famcheck = famcheck[6:]
                             famcheck = famcheck.split(".")[0]
                             family = famcheck.title()
 
@@ -613,6 +614,7 @@ class RunReporting:
         current.cfg = Config(cfg=current.conf_path)
 
         try:
+            log.debug("Executing reporting module \"%s\"", current.__class__.__name__)
             pretime = datetime.now()
             current.run(self.results)
             posttime = datetime.now()
@@ -623,7 +625,6 @@ class RunReporting:
                                          timediff.microseconds / 1000)),
                 })
 
-            log.debug("Executed reporting module \"%s\"", current.__class__.__name__)
         except CuckooDependencyError as e:
             log.warning("The reporting module \"%s\" has missing dependencies: %s", current.__class__.__name__, e)
         except CuckooReportError as e:
@@ -670,6 +671,7 @@ class GetFeeds(object):
 
         try:
             current = feed()
+            log.debug("Loading feed \"{0}\"".format(current.name))
         except:
             log.exception("Failed to load feed \"{0}\":".format(current.name))
             return
@@ -678,6 +680,7 @@ class GetFeeds(object):
             try:
                 current.modify()
                 current.run(modified=True)
+                log.debug("\"{0}\" has been updated".format(current.name))
             except NotImplementedError:
                 current.run(modified=False)
             except:

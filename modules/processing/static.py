@@ -9,6 +9,8 @@ import lib.cuckoo.common.decoders.darkcomet as darkcomet
 import lib.cuckoo.common.decoders.njrat as njrat
 import logging
 import os
+import math
+import array
 import base64
 import hashlib
 from datetime import datetime, timedelta
@@ -59,6 +61,34 @@ from lib.cuckoo.common.peepdf.PDFCore import PDFParser
 from lib.cuckoo.common.peepdf.JSAnalysis import analyseJS
 
 log = logging.getLogger(__name__)
+
+
+# Obtained from
+# https://github.com/erocarrera/pefile/blob/master/pefile.py
+# Copyright Ero Carrera and released under the MIT License:
+# https://github.com/erocarrera/pefile/blob/master/LICENSE
+
+def _get_entropy(data):
+    """ Computes the entropy value for the provided data
+    @param data: data to be analyzed.
+    @return: entropy value as float.
+    """
+    entropy = 0.0
+
+    if len(data) == 0:
+        return entropy
+
+    occurrences = array.array('L', [0]*256)
+
+    for x in data:
+        occurrences[ord(x)] += 1
+
+    for x in occurrences:
+        if x:
+            p_x = float(x) / len(data)
+            entropy -= p_x*math.log(p_x, 2)
+
+    return entropy
 
 # Partially taken from
 # http://malwarecookbook.googlecode.com/svn/trunk/3/8/pescanner.py
@@ -128,12 +158,12 @@ class PortableExecutable:
                 dbgdata = self.pe.__data__[dbgst.PointerToRawData:dbgst.PointerToRawData+dbgst.SizeOfData]
                 if dbgst.Type == 4: #MISC
                     datatype, length, uniflag = struct.unpack_from("IIB", dbgdata)
-                    return str(dbgdata[12:length]).rstrip('\0')
+                    return convert_to_printable(str(dbgdata[12:length]).rstrip('\0'))
                 elif dbgst.Type == 2: #CODEVIEW
                     if dbgdata[:4] == "RSDS":
-                        return str(dbgdata[24:]).rstrip('\0')
+                        return convert_to_printable(str(dbgdata[24:]).rstrip('\0'))
                     elif dbgdata[:4] == "NB10":
-                        return str(dbgdata[16:]).rstrip('\0')
+                        return convert_to_printable(str(dbgdata[16:]).rstrip('\0'))
         except:
             pass
 
@@ -167,9 +197,20 @@ class PortableExecutable:
 
         return imports
 
+    def _get_exported_dll_name(self):
+        """Gets exported DLL name, if any
+        @return: exported DLL name as string or None.
+        """
+        if not self.pe:
+            return None
+
+        if hasattr(self.pe, "DIRECTORY_ENTRY_EXPORT"):
+            return convert_to_printable(self.pe.get_string_at_rva(self.pe.DIRECTORY_ENTRY_EXPORT.struct.Name))
+        return None
+
     def _get_exported_symbols(self):
         """Gets exported symbols.
-        @return: exported symbols dict or None.
+        @return: list of dicts of exported symbols or None.
         """
         if not self.pe:
             return None
@@ -181,7 +222,7 @@ class PortableExecutable:
                 symbol = {}
                 symbol["address"] = hex(self.pe.OPTIONAL_HEADER.ImageBase +
                                         exported_symbol.address)
-                symbol["name"] = exported_symbol.name
+                symbol["name"] = convert_to_printable(exported_symbol.name)
                 symbol["ordinal"] = exported_symbol.ordinal
                 exports.append(symbol)
 
@@ -330,13 +371,13 @@ class PortableExecutable:
                                     filetype = _get_filetype(data)
                                     language = pefile.LANG.get(resource_lang.data.lang, None)
                                     sublanguage = pefile.get_sublang_name_for_lang(resource_lang.data.lang, resource_lang.data.sublang)
-
                                     resource["name"] = name
                                     resource["offset"] = "0x{0:08x}".format(resource_lang.data.struct.OffsetToData)
                                     resource["size"] = "0x{0:08x}".format(resource_lang.data.struct.Size)
                                     resource["filetype"] = filetype
                                     resource["language"] = language
                                     resource["sublanguage"] = sublanguage
+                                    resource["entropy"] = "{0:.02f}".format(float(_get_entropy(data)))
                                     resources.append(resource)
                 except:
                     continue
@@ -380,26 +421,30 @@ class PortableExecutable:
 
                     strio = StringIO()
                     output = StringIO()
-                    simplified = StringIO()
 
                     strio.write(icon)
                     strio.seek(0)
                     img = Image.open(strio)
                     img.save(output, format="PNG")
 
-                    img = img.resize((16,16), Image.ANTIALIAS)
-                    img = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=4)
-                    img.save(simplified, format="PNG", colors=4)
+                    img = img.resize((8,8), Image.BILINEAR)
+                    img = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=2).convert("L")
+                    lowval = img.getextrema()[0]
+                    img = img.point(lambda i: 255 if i > lowval else 0)
+                    img = img.convert("1")
+                    simplified = bytearray(img.getdata())
 
                     m = hashlib.md5()
                     m.update(output.getvalue())
                     fullhash = m.hexdigest()
                     m = hashlib.md5()
-                    m.update(simplified.getvalue())
+                    m.update(simplified)
                     simphash = m.hexdigest()
                     return base64.b64encode(output.getvalue()), fullhash, simphash
         except:
-            return None, None, None
+            pass
+
+        return None, None, None
 
     def _get_versioninfo(self):
         """Get version info.
@@ -419,6 +464,8 @@ class PortableExecutable:
                                     entry = {}
                                     entry["name"] = convert_to_printable(str_entry[0])
                                     entry["value"] = convert_to_printable(str_entry[1])
+                                    if entry["name"] == "Translation" and len(entry["value"]) == 10:
+                                        entry["value"] = "0x0" + entry["value"][2:5] + " 0x0" + entry["value"][7:10]
                                     infos.append(entry)
                         elif hasattr(entry, "Var"):
                             for var_entry in entry.Var:
@@ -426,6 +473,8 @@ class PortableExecutable:
                                     entry = {}
                                     entry["name"] = convert_to_printable(var_entry.entry.keys()[0])
                                     entry["value"] = convert_to_printable(var_entry.entry.values()[0])
+                                    if entry["name"] == "Translation" and len(entry["value"]) == 10:
+                                        entry["value"] = "0x0" + entry["value"][2:5] + " 0x0" + entry["value"][7:10]
                                     infos.append(entry)
                     except:
                         continue
@@ -518,6 +567,7 @@ class PortableExecutable:
         results["pe_osversion"] = self._get_osversion()
         results["pe_pdbpath"] = self._get_pdb_path()
         results["pe_imports"] = self._get_imported_symbols()
+        results["pe_exported_dll_name"] = self._get_exported_dll_name()
         results["pe_exports"] = self._get_exported_symbols()
         results["pe_dirents"] = self._get_directory_entries()
         results["pe_sections"] = self._get_sections()

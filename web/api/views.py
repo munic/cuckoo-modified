@@ -1,6 +1,5 @@
 import json
 import os
-import pymongo
 import re
 import socket
 import sys
@@ -14,7 +13,6 @@ from django.template import RequestContext
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_safe
 from ratelimit.decorators import ratelimit
-from gridfs import GridFS
 from StringIO import StringIO
 from zipfile import ZipFile, ZIP_STORED
 
@@ -23,6 +21,7 @@ sys.path.append(settings.CUCKOO_PATH)
 from lib.cuckoo.common.config import Config
 from lib.cuckoo.common.constants import CUCKOO_ROOT, CUCKOO_VERSION
 from lib.cuckoo.common.utils import store_temp_file, delete_folder
+from lib.cuckoo.common.quarantine import unquarantine
 from lib.cuckoo.core.database import Database, Task
 from lib.cuckoo.core.database import TASK_RUNNING, TASK_REPORTED
 
@@ -156,6 +155,7 @@ def tasks_create_file(request):
             return jsonize(resp, response=True)
         resp["error"] = False
         # Parse potential POST options (see submission/views.py)
+        quarantine = request.POST.get("quarantine", "")
         package = request.POST.get("package", "")
         timeout = force_int(request.POST.get("timeout"))
         priority = force_int(request.POST.get("priority"))
@@ -211,9 +211,20 @@ def tasks_create_file(request):
                     resp = {"error": True,
                             "error_value": "File size exceeds API limit"}
                     return jsonize(resp, response=True)
-                path = store_temp_file(sample.read(), sample.name)
+
+                tmp_path = store_temp_file(sample.read(), sample.name)
+
+                if quarantine:
+                    path = unquarantine(tmp_path)
+                    try:
+                        os.remove(tmp_path)
+                    except:
+                        pass
+                else:
+                    path = tmp_path
+
                 for entry in task_machines:
-                    task_id = db.add_path(file_path=path,
+                    task_ids_new = db.demux_sample_and_add_to_db(file_path=path,
                                           package=package,
                                           timeout=timeout,
                                           priority=priority,
@@ -226,8 +237,8 @@ def tasks_create_file(request):
                                           enforce_timeout=enforce_timeout,
                                           clock=clock,
                                           )
-                    if task_id:
-                        task_ids.append(task_id)
+                    if task_ids_new:
+                        task_ids.extend(task_ids_new)
         else:
             # Grab the first file
             sample = request.FILES.getlist("file")[0]
@@ -242,9 +253,19 @@ def tasks_create_file(request):
             if len(request.FILES.getlist("file")) > 1:
                 resp["warning"] = ("Multi-file API submissions disabled - "
                                    "Accepting first file")
-            path = store_temp_file(sample.read(), sample.name)
+            tmp_path = store_temp_file(sample.read(), sample.name)
+
+            if quarantine:
+                path = unquarantine(tmp_path)
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+            else:
+                path = tmp_path
+
             for entry in task_machines:
-                task_id = db.add_path(file_path=path,
+                task_ids_new = db.demux_sample_and_add_to_db(file_path=path,
                                       package=package,
                                       timeout=timeout,
                                       priority=priority,
@@ -257,8 +278,8 @@ def tasks_create_file(request):
                                       enforce_timeout=enforce_timeout,
                                       clock=clock,
                                       )
-                if task_id:
-                    task_ids.append(task_id)
+                if task_ids_new:
+                    task_ids.extend(task_ids_new)
                     
         if len(task_ids) > 0:
             resp["task_ids"] = task_ids
@@ -925,6 +946,16 @@ def tasks_iocs(request, task_id, detail=None):
     buf = {}
     if repconf.mongodb.get("enabled") and not buf:
         buf = results_db.analysis.find_one({"info.id": int(task_id)})
+    if repconf.elasticsearchdb.get("enabled") and not buf:
+        tmp = es.search(
+                  index="cuckoo-*",
+                  doc_type="analysis",
+                  q="info.id: \"%s\"" % task_id
+               )["hits"]["hits"]
+        if tmp:
+            buf = tmp[-1]["_source"]
+        else:
+            buf = None
     if repconf.jsondump.get("enabled") and not buf:
         jfile = os.path.join(CUCKOO_ROOT, "storage", "analyses",
                              "%s" % task_id, "reports", "report.json")
